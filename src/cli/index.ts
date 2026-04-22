@@ -2178,6 +2178,90 @@ program
     }
   }))
 
+// ─── leads:export ───────────────────────────────────────────────────────────
+program
+  .command('leads:export')
+  .description('Export a result set to CSV, JSON, Google Sheets, webhook, or sequencer-formatted CSV')
+  .requiredOption('--result-set <id>', 'Result set ID to export')
+  .option('--destination <type>', 'Export destination: csv, json, google-sheets, webhook, lemlist, apollo, woodpecker', 'csv')
+  .option('--output <path>', 'Output file path (for file-based exports)')
+  .option('--fields <fields>', 'Comma-separated list of fields to include')
+  .option('--url <url>', 'Webhook URL (required for webhook destination)')
+  .option('--sheet-id <id>', 'Google Spreadsheet ID (required for google-sheets destination)')
+  .option('--headers <json>', 'Custom headers as JSON (for webhook)')
+  .action(withDiagnostics(async (opts) => {
+    const { db } = await import('../lib/db')
+    const { resultRows } = await import('../lib/db/schema')
+    const { eq } = await import('drizzle-orm')
+    const { createDefaultRegistry } = await import('../lib/export/registry')
+
+    // Load rows from result set
+    const rows = await db
+      .select()
+      .from(resultRows)
+      .where(eq(resultRows.resultSetId, opts.resultSet))
+
+    if (rows.length === 0) {
+      console.error(`No rows found for result set: ${opts.resultSet}`)
+      process.exit(1)
+    }
+
+    const data = rows.map(row => {
+      const d = typeof row.data === 'string' ? JSON.parse(row.data) : (row.data ?? row)
+      return d as Record<string, unknown>
+    })
+
+    console.log(`Loaded ${data.length} rows from result set ${opts.resultSet}`)
+
+    // Resolve adapter
+    const registry = createDefaultRegistry()
+    const SEQUENCER_FORMATS = ['lemlist', 'apollo', 'woodpecker']
+    const isSequencer = SEQUENCER_FORMATS.includes(opts.destination)
+    const adapterId = isSequencer ? 'sequencer-csv' : opts.destination
+
+    const adapter = registry.get(adapterId)
+    if (!adapter) {
+      console.error(`Unknown destination: ${opts.destination}. Available: csv, json, google-sheets, webhook, ${SEQUENCER_FORMATS.join(', ')}`)
+      process.exit(1)
+    }
+
+    // Build options
+    let destination = opts.output || ''
+    if (opts.destination === 'webhook') {
+      destination = opts.url || ''
+      if (!destination) {
+        console.error('--url is required for webhook destination')
+        process.exit(1)
+      }
+    } else if (opts.destination === 'google-sheets') {
+      destination = opts.sheetId || ''
+      if (!destination) {
+        console.error('--sheet-id is required for google-sheets destination')
+        process.exit(1)
+      }
+    }
+
+    const fields = opts.fields ? opts.fields.split(',').map((f: string) => f.trim()) : undefined
+    const format = isSequencer ? opts.destination : (opts.headers || undefined)
+
+    const result = await adapter.export(data, {
+      destination,
+      fields,
+      format,
+      tenantId: getTenant(),
+    })
+
+    if (result.success) {
+      console.log(`Exported ${result.recordsExported} records to ${result.destination}`)
+    } else {
+      console.error(`Export failed: ${result.errors?.join('; ')}`)
+      if (result.recordsExported > 0) {
+        console.log(`  Partial export: ${result.recordsExported} records succeeded`)
+      }
+      process.exit(1)
+    }
+  }))
+
 // ─── research ────────────────────────────────────────────────────────────────
 program
   .command('research')
