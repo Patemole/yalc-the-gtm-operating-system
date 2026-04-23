@@ -295,41 +295,58 @@ export async function runStart(opts: StartOptions): Promise<void> {
 }
 
 /**
- * Apply pending drizzle migrations. Idempotent: when everything is current
- * this is a no-op and prints nothing. When it applies migrations, prints
- * "✓ Database ready".
+ * Bring the database up to the current schema via `drizzle-kit push`.
+ *
+ * We don't use drizzle-orm's journal-based migrator: the repo's journal
+ * only tracks 0000, and schema.ts defines tables (e.g. campaign_variants)
+ * that no migration SQL file creates. Push diffs schema → DB directly, so
+ * it's the only approach that keeps fresh installs and existing dev DBs
+ * in sync with the schema source of truth.
  */
 async function applyMigrations(): Promise<void> {
-  const { rawClient, db } = await import('../db/index.js')
-  const { migrate } = await import('drizzle-orm/libsql/migrator')
+  const { spawn } = await import('node:child_process')
   const { fileURLToPath } = await import('node:url')
   const { dirname, resolve } = await import('node:path')
+  const { existsSync } = await import('node:fs')
+  const { rawClient } = await import('../db/index.js')
+
+  // If the DB already has core tables, the user bootstrapped it previously
+  // (either via a prior run or via `pnpm drizzle-kit push`). Skip — push can
+  // prompt interactively when it detects tables to drop, which would hang
+  // unattended runs.
+  try {
+    const r = await rawClient.execute(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name = 'campaigns' LIMIT 1"
+    )
+    if (r.rows.length > 0) return
+  } catch {
+    // DB file may not exist yet — fall through to push
+  }
 
   const here = dirname(fileURLToPath(import.meta.url))
-  // This file lives at src/lib/onboarding/start.ts → migrations at src/lib/db/migrations
-  const migrationsFolder = resolve(here, '../db/migrations')
+  const pkgRoot = resolve(here, '../../..')
+  const bin = resolve(pkgRoot, 'node_modules/.bin/drizzle-kit')
 
-  // Count applied migrations before and after to decide whether to log.
-  async function countApplied(): Promise<number> {
-    try {
-      const r = await rawClient.execute(
-        "SELECT COUNT(*) AS n FROM __drizzle_migrations"
-      )
-      const row = r.rows[0] as Record<string, unknown> | undefined
-      const n = row ? Number(row.n ?? 0) : 0
-      return Number.isFinite(n) ? n : 0
-    } catch {
-      return 0 // table doesn't exist yet → first run
-    }
+  if (!existsSync(bin)) {
+    console.log('  ⚠ drizzle-kit not found. Run `pnpm install` in the package root, then `pnpm drizzle-kit push`.')
+    return
   }
 
-  const before = await countApplied()
-  await migrate(db, { migrationsFolder })
-  const after = await countApplied()
+  const child = spawn(bin, ['push'], {
+    cwd: pkgRoot,
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const chunks: Buffer[] = []
+  child.stdout.on('data', (c) => chunks.push(c))
+  child.stderr.on('data', (c) => chunks.push(c))
+  const code: number = await new Promise((res) => child.on('close', (c) => res(c ?? 0)))
 
-  if (after > before) {
-    console.log('  ✓ Database ready')
+  if (code !== 0) {
+    console.error(Buffer.concat(chunks).toString('utf-8'))
+    throw new Error(`drizzle-kit push failed with exit code ${code}`)
   }
+  console.log('  ✓ Database ready')
 }
 
 function printFileStructure(): void {
