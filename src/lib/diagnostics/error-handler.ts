@@ -300,6 +300,17 @@ export function withDiagnostics<T extends (...args: any[]) => Promise<void>>(
       await action(...args)
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error))
+
+      // Claude Code redirects are an expected, friendly exit — not a failure.
+      // Print the message verbatim and exit 0 so parent CC sessions don't
+      // treat the spawn as broken.
+      if ((err as { isClaudeCodeRedirect?: boolean }).isClaudeCodeRedirect) {
+        console.error('')
+        console.error(`  ${err.message.replace(/\n/g, '\n  ')}`)
+        console.error('')
+        process.exit(0)
+      }
+
       const diagnostic = classifyError(err)
 
       if (diagnostic) {

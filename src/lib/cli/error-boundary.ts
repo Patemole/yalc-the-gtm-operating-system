@@ -122,6 +122,14 @@ export function installGlobalErrorBoundary(): void {
 }
 
 function handleFatalError(error: Error): void {
+  // Claude Code redirects: print friendly guidance, exit 0 (not 1).
+  if ((error as { isClaudeCodeRedirect?: boolean }).isClaudeCodeRedirect) {
+    console.error('')
+    console.error(`  ${error.message.replace(/\n/g, '\n  ')}`)
+    console.error('')
+    process.exit(0)
+  }
+
   const formatted = formatError(error)
 
   if (formatted) {
